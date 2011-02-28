@@ -104,22 +104,14 @@ class BitDiddleBreaker:
     print self.p
 
     # Map sequences of single bytes through S
-    outputs = dict()
-    candidatesForS0 = []
-    for value in range (0, 256, 8):
+    outputs = [0]*256
+    for value in range(0, 256):
       enc = self.getCiphertext(
-        self.unpermute(
-          ((value + 7) << 56 | (value + 6) << 48 | (value + 5) << 40 | (value + 4) << 32 |
-           (value + 3) << 24 | (value + 2) << 16 | (value + 1) << 8 | value), self.p) << 64) >> 64
-      for i in range(0, 8):
-        output = enc & 0xFF
-        outputs[value + i] = output
-        enc = enc >> 8
-        if (output == value + i):
-          candidatesForS0.append(output)
-    print candidatesForS0
+        self.unpermute(value, self.p) << 64) >> 64
+      output = enc & 0xFF
+      outputs[value] = output
 
-    for candidate in candidatesForS0:
+    for candidate in range(0, 256):
       for i in range(0, 256):
         self.s[i] = outputs[i ^ candidate]
       print self.s
