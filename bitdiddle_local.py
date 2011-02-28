@@ -5,8 +5,7 @@ import random
 class BitDiddleBreaker:
   def __init__(self):
     self.ciphercache = dict()
-    self.pRaw = [[], [], [], [], [], [], [], []]
-    self.p = []
+    self.p = [0]*64
     self.s = [0]*256
     self.p_actual = range(0, 64)
     random.shuffle(self.p_actual)
@@ -51,15 +50,11 @@ class BitDiddleBreaker:
       i += 1
     return -1
 
-  def encodeBytes(self, bytes):
-    result = 0
+  def unpermute(self, bytes, p):
     scrambled = 0
-    for byte in bytes:
-      result = result << 8
-      result = result | byte
     for bit in range(0, 64):
-      scrambled = scrambled | ((result & 1) << self.p.index(bit))
-      result = result >> 1
+      scrambled = scrambled | ((bytes & 1) << p.index(bit))
+      bytes = bytes >> 1
     return scrambled
 
   def encryptLocally(self, plaintext, p, s):
@@ -90,6 +85,8 @@ class BitDiddleBreaker:
   def run(self):
     # Map bits to bytes to find p
     zeroC = self.getCiphertext(0)
+    pRaw = [[], [], [], [], [], [], [], []]
+
     for i in range(64, 128):
       cBit = self.getCiphertext(2 ** i)
       deltaL = (cBit ^ zeroC) >> 64
@@ -97,10 +94,13 @@ class BitDiddleBreaker:
       byte = self.getNonZeroByte(deltaL)
       if byte == -1:
         return
-      self.pRaw[byte].append(i - 64)
+      pRaw[byte].append(i - 64)
       print byte
-    print self.pRaw
-    self.p = [item for sublist in self.pRaw for item in sublist]
+    print pRaw
+    temp = [item for sublist in pRaw for item in sublist]
+    print temp
+    for i in range(0, 64):
+      self.p[i] = temp.index(i)
     print self.p
 
     # Map sequences of single bytes through S
@@ -108,7 +108,9 @@ class BitDiddleBreaker:
     candidatesForS0 = []
     for value in range (0, 256, 8):
       enc = self.getCiphertext(
-        self.encodeBytes([value + 7, value + 6, value + 5, value + 4, value + 3, value + 2, value + 1, value]) << 64) >> 64
+        self.unpermute(
+          ((value + 7) << 56 | (value + 6) << 48 | (value + 5) << 40 | (value + 4) << 32 |
+           (value + 3) << 24 | (value + 2) << 16 | (value + 1) << 8 | value), self.p) << 64) >> 64
       for i in range(0, 8):
         output = enc & 0xFF
         outputs[value + i] = output
@@ -122,8 +124,16 @@ class BitDiddleBreaker:
         self.s[i] = outputs[i ^ candidate]
       print self.s
 
-#      if self.encryptLocally(0, self.p, self.s) == zeroC:
-      print self.guess(self.p, self.s)
+      print self.toBase16(self.encryptLocally(0, self.p, self.s))
+      print self.toBase16(zeroC)
+      if self.encryptLocally(0, self.p, self.s) == zeroC:
+        print "Success!"
+        break
+    print "-----"
+    print self.p_actual
+    print self.s_actual
+    print "-----"
+    print [x / 8 for x in self.p] == [x / 8 for x in self.p_actual]
 
 if __name__ == '__main__':
   BitDiddleBreaker().run()

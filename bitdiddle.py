@@ -11,8 +11,7 @@ class BitDiddleBreaker:
     self.ENC_URL = 'http://6.857.scripts.mit.edu/ps2/encrypt?key=%s&data=%s'
     self.GUESS_URL = 'http://6.857.scripts.mit.edu/ps2/guess?key=%s&p=%s&S=%s'
     self.ciphercache = dict()
-    self.pRaw = [[], [], [], [], [], [], [], []]
-    self.p = []
+    self.p = [0]*64
     self.s = [0]*256
 
   def getNewKey(self):
@@ -70,11 +69,38 @@ class BitDiddleBreaker:
       result = result >> 1
     return scrambled
 
+  def encryptLocally(self, plaintext, p, s):
+    result = plaintext
+    for i in range(0, 3):
+      result = self.round(result, p, s)
+    return result
+
+  def round(self, plaintext, p, s):
+    left = plaintext >> 64
+    right = plaintext & 0xFFFFFFFFFFFFFFFF
+    return (right << 64) | (left ^ self.substitute(self.permute(right, p), s))
+
+  def permute(self, half, p):
+    scrambled = 0
+    for bit in range(0, 64):
+      scrambled = scrambled | ((half & 1) << p[bit])
+      half = half >> 1
+    return scrambled
+
+  def substitute(self, half, s):
+    scrambled = 0
+    for byte in range(0, 64, 8):
+      scrambled = scrambled | (s[half & 0xFF] << byte)
+      half = half >> 8
+    return scrambled
+
   def run(self):
     self.getNewKey()
 
     # Map bits to bytes to find p
     zeroC = self.getCiphertext(0)
+    pRaw = [[], [], [], [], [], [], [], []]
+
     for i in range(64, 128):
       cBit = self.getCiphertext(2 ** i)
       deltaL = (cBit ^ zeroC) >> 64
@@ -82,10 +108,13 @@ class BitDiddleBreaker:
       byte = self.getNonZeroByte(deltaL)
       if byte == -1:
         return
-      self.pRaw[byte].append(i - 64)
+      pRaw[byte].append(i - 64)
       print byte
-    print self.pRaw
-    self.p = [item for sublist in self.pRaw for item in sublist]
+    print pRaw
+    temp = [item for sublist in pRaw for item in sublist]
+    print temp
+    for i in range(0, 64):
+      self.p[i] = temp.index(i)
     print self.p
 
     # Map sequences of single bytes through S
@@ -93,7 +122,7 @@ class BitDiddleBreaker:
     candidatesForS0 = []
     for value in range (0, 256, 8):
       enc = self.getCiphertext(
-        self.encodeBytes([value + 7, value + 6, value + 5, value + 4, value + 3, value + 2, value + 1, value]) << 64)
+        self.encodeBytes([value + 7, value + 6, value + 5, value + 4, value + 3, value + 2, value + 1, value]) << 64) >> 64
       for i in range(0, 8):
         output = enc & 0xFF
         outputs[value + i] = output
@@ -102,15 +131,13 @@ class BitDiddleBreaker:
           candidatesForS0.append(output)
     print candidatesForS0
 
-    if len(candidatesForS0) != 1:
-      return
+    for candidate in candidatesForS0:
+      for i in range(0, 256):
+        self.s[i] = outputs[i ^ candidate]
+      print self.s
 
-    for i in range(0, 256):
-      self.s[i ^ candidatesForS0[0]] = outputs[i]
-
-    print self.s
-
-    print self.guess(self.p, self.s)
+      if self.encryptLocally(0, self.p, self.s) == zeroC:
+        print self.guess(self.p, self.s)
 
 if __name__ == '__main__':
   BitDiddleBreaker().run()
