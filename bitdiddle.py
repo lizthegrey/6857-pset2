@@ -13,6 +13,7 @@ class BitDiddleBreaker:
     self.ciphercache = dict()
     self.pRaw = [[], [], [], [], [], [], [], []]
     self.p = []
+    self.s = [0]*256
 
   def getNewKey(self):
     text = urllib2.urlopen(self.GENKEY_URL).readline()
@@ -32,6 +33,7 @@ class BitDiddleBreaker:
        return result
 
   def guess(self, p, s):
+    print self.GUESS_URL % (self.KEY_NUMBER, self.arrayToBase16(p), self.arrayToBase16(s))
     return urllib2.urlopen(
         self.GUESS_URL % (self.KEY_NUMBER, self.arrayToBase16(p), self.arrayToBase16(s))
       ).readline()
@@ -45,7 +47,8 @@ class BitDiddleBreaker:
   def arrayToBase16(self, arr):
     resp = ''
     for value in arr:
-      resp += toBase16(value).zfill(2)
+      resp += self.toBase16(value).zfill(2)
+    return resp
 
   def getNonZeroByte(self, delta):
     i = 0
@@ -57,7 +60,15 @@ class BitDiddleBreaker:
     return -1
 
   def encodeBytes(self, bytes):
-    pass
+    result = 0
+    scrambled = 0
+    for byte in bytes:
+      result = result << 8
+      result = result | byte
+    for bit in range(0, 64):
+      scrambled = scrambled | ((result & 1) << self.p.index(bit))
+      result = result >> 1
+    return scrambled
 
   def run(self):
     self.getNewKey()
@@ -69,16 +80,37 @@ class BitDiddleBreaker:
       deltaL = (cBit ^ zeroC) >> 64
       print 'D: %s' % self.toBase16(deltaL).zfill(16)
       byte = self.getNonZeroByte(deltaL)
+      if byte == -1:
+        return
       self.pRaw[byte].append(i - 64)
       print byte
     print self.pRaw
     self.p = [item for sublist in self.pRaw for item in sublist]
     print self.p
 
-    # Map a single byte through S
-    #self.pRaw[0]
+    # Map sequences of single bytes through S
+    outputs = dict()
+    candidatesForS0 = []
+    for value in range (0, 256, 8):
+      enc = self.getCiphertext(
+        self.encodeBytes([value + 7, value + 6, value + 5, value + 4, value + 3, value + 2, value + 1, value]) << 64)
+      for i in range(0, 8):
+        output = enc & 0xFF
+        outputs[value + i] = output
+        enc = enc >> 8
+        if (output == value + i):
+          candidatesForS0.append(output)
+    print candidatesForS0
 
-    #print guess(p, s)
+    if len(candidatesForS0) != 1:
+      return
+
+    for i in range(0, 256):
+      self.s[i ^ candidatesForS0[0]] = outputs[i]
+
+    print self.s
+
+    print self.guess(self.p, self.s)
 
 if __name__ == '__main__':
   BitDiddleBreaker().run()
