@@ -1,5 +1,4 @@
 #!/usr/bin/python2.6
-#!/usr/bin/python2.4
 
 # Copyright (c) 2011 Google, Inc.
 # Author: Liz Fong (lizf@google.com/lizfong@mit.edu)
