@@ -10,16 +10,43 @@ import random
 import urllib2
 
 class BitDiddleModule:
+'''
+  Implements the core steps required to crack the BitDiddle cipher with both
+  two and three rounds, using analysis of ciphertext corresponding to chosen
+  plaintexts.
+
+  Requires 64 chosen plaintexts to determine an approximate guess for p.
+  Requires 256 chosen plaintexts to determine S[0] (only applies to 3 rounds).
+  Requires 256 chosen plaintexts to determine the full S table.
+  Performs final checking with 256 random plaintexts.
+'''
+
   def __init__(self):
+    '''
+      Initializes a BitDiddleModule with parameters.
+      rounds is the number of rounds to crack (either 2 or 3)
+      local is a boolean indicating whether the real hw2 server should be used
+        or instead a local (much faster) implementation of the cipher.
+    '''
+    self.rounds = 3
+    self.local = False
+
+    if self.local:
+      self.keymaster = BitDiddleLocalKeyMaster(self.rounds, True)
+    else:
+      self.keymaster = BitDiddleRemoteKeyMaster(self.rounds, True)
     self.p_guess = array.array('B', [0]*64)
     self.s_guess = array.array('B', [0]*256)
-    self.rounds = 3
-    self.keymaster = BitDiddleLocalKeyMaster(self.rounds, True)
-    #self.keymaster = BitDiddleRemoteKeyMaster(self.rounds, True)
 
   def runSerially(self):
+    '''
+      Serially invokes each of the required steps to crack BitDiddle.
+    '''
+    # Compute an initial guess for p.
     p_initial = self.guessP()
     print p_initial
+
+    # Compute the offset if 3 rounds are involved; otherwise, offset=0
     if self.rounds == 3:
       offset = self.guessOffset()
     else:
@@ -27,69 +54,121 @@ class BitDiddleModule:
     outputs = self.guessS(p_initial, offset)
 
     # Save the output to make debugging easier.
-    cPickle.dump([p_initial, outputs, offset, self.rounds], open('guess.p', 'wb'))
+    cPickle.dump([p_initial, outputs, offset, self.rounds],
+                 open('guess.p', 'wb'))
 
+    # Serially enumerate the S tables for each byte.
+    # This could be sharded by byte using a tool such as MapReduce.
     results = dict()
-
-    # Serially enumerate the S tables for each byte; this could be sharded by byte e.g. MapReduce.
     for i in range(0, 8):
       for key, value in BitDiddleModule.mapper(outputs, p_initial, i):
+        # Emulate MapReduce's "shuffle" function by aggregating outputs
+        # that share the same key.
         immutableKey = tuple(key)
         try:
           results[immutableKey].append(value)
         except KeyError:
           results[immutableKey] = [value]
+
+    # Checkpoint output to ease debugging.
     cPickle.dump(results, open('results.p', 'wb'))
+
+    # Save off our final results.
     (self.p_guess, self.s_guess) = BitDiddleModule.reduce(results, p_initial)
 
+    # Check results against the keymaster.
     self.check()
 
   def guessP(self):
-    # Map bits to bytes to find p
+    '''
+      Perturbs single bits in the plaintext and determines which corresponding
+      byte in the ciphertext is altered in order to map values of p to the
+      nearest byte.
+    '''
+    # Compute the reference ciphertext.
     zeroC = self.keymaster.getCiphertext(0)
+
+    # Set up data storage to populate as we find values.
     pRaw = [array.array('B', []) for i in range(0, 8)]
     p_guess = array.array('B', [0]*64)
 
+    # Iterate over each bit in the half we're controlling.
     for i in range(0, 64):
-      cBit = self.keymaster.getCiphertext(BitDiddleUtil.shiftIfThreeRounds(1 << i, self.rounds))
+      cBit = self.keymaster.getCiphertext(
+        BitDiddleUtil.shiftIfThreeRounds(1 << i, self.rounds))
+      # Compute the difference between the two ciphertexts.
       deltaL = (cBit ^ zeroC) >> 64
       print 'D: %s' % BitDiddleUtil.toBase16(deltaL).zfill(16)
+
+      # Find which byte changed.
       byte = BitDiddleUtil.getNonZeroByte(deltaL)
       if byte == -1:
-        # TODO(lizfong): deal with this case gracefully by evaluating a case that isn't comparing against zeroC.
+        # TODO(lizfong): deal with this case gracefully by evaluating a
+        # different pair of original and disturbed plaintexts if altering a
+        # bit of zeroC does not result in a change in output.
         raise Exception('Could not find byte position in p for input bit.')
+
+      # Add the bit to the list of bits that affect the changed byte.
       pRaw[byte].append(i)
       print byte
-    print pRaw
+
+    # Construct the provisional mapping from old bit to new bit.
     temp = [item for sublist in pRaw for item in sublist]
     print temp
     for i in range(0, 64):
       p_guess[i] = temp.index(i)
+
     return p_guess
 
   def guessOffset(self):
-    # Map non-permuted sequences of repeated single bytes through S for 3 rounds case.
+    '''
+      Find the ciphertexts for non-permuted sequences of repeated bytes.
+      If any of them cancel out with S[0], producing 0 as the input to the
+      next round and S[0] as the output of that round, we've found S[0].
+      This only needs to be run for the three-round case.
+    '''
     for value in range(0, 256):
+      # Create the repeated value.
       repeated_value = 0
       for i in range(0, 64, 8):
         repeated_value = repeated_value | (value << i)
+      # Encipher the repeated value, and find the output half to match.
       enc = self.keymaster.getCiphertext(repeated_value << 64) >> 64
       if enc == repeated_value:
+        # We've found the value of the S[0] offset.
         print 'O: %s' % BitDiddleUtil.toBase16(repeated_value).zfill(16)
         return repeated_value
+    # If we're unable to determine S, then we should stop execution.
     raise Exception('Could not find offset to accommodate s[0]')
 
   def guessS(self, p_guess, offset):
-    # Map reverse-permuted sequences of repeated single bytes through S
+    '''
+      Map sequences of repeated single bytes through S using the provisional
+      guess for p to reverse-permute the bytes; this means that the derived
+      values as inputs to S[x] will be some permutation of the bits of x
+      that is different for each output byte; but is guaranteed to recover
+      each possible input/output pair in some order.
+    '''
+    # Set up a separate table for each byte position.
     outputs = [array.array('B', [0]*256) for i in range(0, 8)]
+
+    # Iterate through each byte input value
     for value in range(0, 256):
+      # Generate the repeated pattern e.g. 0xABABABABABABABAB for value 0xAB
       repeated_value = 0
       for i in range(0, 64, 8):
         repeated_value = repeated_value | (value << i)
+      # Reverse-permute the bits that we want to see after p to derive
+      # appropriate initial input values.
+      # If an offset exists, XOR the repeated pattern with the offset.
       cleartext = offset ^ BitDiddleUtil.unpermute(repeated_value, p_guess)
+
+      # Find the output of the cipher.
       enc = self.keymaster.getCiphertext(
         BitDiddleUtil.shiftIfThreeRounds(cleartext, self.rounds)) >> 64
 
+      # Read each byte out of the cipher and encode it into the table
+      # for the input value.
       for i in range(0, 8):
         output = (enc >> (i * 8)) & 0xFF
         outputs[i][value] = output
@@ -97,19 +176,29 @@ class BitDiddleModule:
     return outputs
 
   def mapper(outputs, p_guess, i):
-    # Now outputs contains, for each byte, the s-table for that byte with the byte permutation applied to that byte.
+    '''
+      Outputs contains, for each byte, the s-table for that byte with an
+      unknown byte permutation applied to that byte's input value.
+      e.g. S'[x] = S[pdelta[x]]
+      Enumerate each possible byte permutation of the input byte to produce
+      a possible truth table for the original S[x].
+    '''
     counter = 0
     for pdelta in itertools.permutations(array.array('B', [0, 1, 2, 3, 4, 5, 6, 7])):
-      # Temp output progress
+      # This step is slow, since it iterates over ~40,000 permutations.
+      # Output progress periodically so we know we aren't stuck.
       if counter % 1000 == 0:
         print '%s: %s' % (i, counter)
       counter += 1
 
-      s_temp = array.array('B', [0]*256)
-
+      derived_s = array.array('B', [0]*256)
       for x in range(0, 256):
-        s_temp[BitDiddleUtil.permute(x, pdelta)] = outputs[i][x]
-      yield s_temp, (i, pdelta)
+        # Compute the new truth table by permuting the input byte.
+        derived_s[BitDiddleUtil.permute(x, pdelta)] = outputs[i][x]
+
+      # We output the derived S truth table as the key, and the byte offset
+      # of the inputs and the applied permutation as the value.
+      yield derived_s, (i, pdelta)
   mapper = staticmethod(mapper)
 
   def reduce(results, p_guess):
