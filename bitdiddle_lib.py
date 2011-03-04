@@ -14,9 +14,9 @@ class BitDiddleModule:
   def __init__(self):
     self.p_guess = array.array('B', [0]*64)
     self.s_guess = array.array('B', [0]*256)
-    self.rounds = 3
-    self.keymaster = BitDiddleLocalKeyMaster(self.rounds, True)
-    #self.keymaster = BitDiddleRemoteKeyMaster(self.rounds, True)
+    self.rounds = 2
+    #self.keymaster = BitDiddleLocalKeyMaster(self.rounds, True)
+    self.keymaster = BitDiddleRemoteKeyMaster(self.rounds, True)
 
   def run(self):
     p_initial = self.guessP()
@@ -157,7 +157,7 @@ class BitDiddleModule:
   def check(self):
     if BitDiddleUtil.encryptLocally(0, self.p_guess, self.s_guess, self.rounds) == self.keymaster.getCiphertext(0):
       print "Success!"
-    for i in range(0, 512):
+    for i in range(0, 256):
       plaintext = random.randint(0, 2 ** 128 - 1)
       if BitDiddleUtil.encryptLocally(plaintext, self.p_guess, self.s_guess, self.rounds) != self.keymaster.getCiphertext(plaintext):
         print "Failed on input %s" % plaintext
@@ -221,9 +221,12 @@ class BitDiddleRemoteKeyMaster(BitDiddleKeyMaster):
   def guess(self, p, s):
     print 'Guessed p: %s' % p
     print 'Guessed s: %s' % str(s)
-    guess_final_url =  self.GUESS_URL % (self.KEY_NUMBER, BitDiddleUtil.arrayToBase16(p), BitDiddleUtil.arrayToBase16(s))
+    final_p = array.array('B', [0]*64)
+    for i in range(0, 64):
+      final_p[63 - i] = 63 - p.index(i)
+    guess_final_url =  self.GUESS_URL % (self.KEY_NUMBER, BitDiddleUtil.arrayToBase16(final_p), BitDiddleUtil.arrayToBase16(s))
     print guess_final_url
-    return urllib2.urlopen(guess_final_url).readline()
+    print urllib2.urlopen(guess_final_url).readline()
 
 class BitDiddleUtil:
   def toBase16(num):
