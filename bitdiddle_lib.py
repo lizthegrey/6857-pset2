@@ -13,37 +13,34 @@ class BitDiddleModule:
   def __init__(self):
     self.p_guess = array.array('B', [0]*64)
     self.s_guess = array.array('B', [0]*256)
-    self.rounds = 2
-    #self.keymaster = BitDiddleLocalKeyMaster(self.rounds, True)
-    self.keymaster = BitDiddleRemoteKeyMaster(self.rounds, True)
+    self.rounds = 3
+    self.keymaster = BitDiddleLocalKeyMaster(self.rounds, True)
+    #self.keymaster = BitDiddleRemoteKeyMaster(self.rounds, True)
 
-  def run(self):
+  def runSerially(self):
     p_initial = self.guessP()
     print p_initial
-    outputs = self.guessS(p_initial)
-
-    # To be used in the future when I have separate compute nodes that need to use the pickles.
-    cPickle.dump([p_initial, outputs, self.rounds], open("guess.p", "wb"))
-
-    max_offset = 1
-
     if self.rounds == 3:
-      # This will not actually work in any realistic time/memory single-threaded.
-      # Provided only to make clear what the mapper/reducer are doing.
-      max_offset = 256
-    for k in range(0, max_offset):
-      print 'k round is %s:' % k
-      results = dict()
-      for key, value in BitDiddleModule.mapper(outputs, p_initial, k):
-        immutableKey = (key[0], tuple(key[1]))
+      offset = self.guessOffset()
+    else:
+      offset = 0
+    outputs = self.guessS(p_initial, offset)
+
+    # Save the output to make debugging easier.
+    cPickle.dump([p_initial, outputs, offset, self.rounds], open('guess.p', 'wb'))
+
+    results = dict()
+
+    # Serially enumerate the S tables for each byte; this could be sharded by byte e.g. MapReduce.
+    for i in range(0, 8):
+      for key, value in BitDiddleModule.mapper(outputs, p_initial, i):
+        immutableKey = tuple(key)
         try:
           results[immutableKey].append(value)
         except KeyError:
           results[immutableKey] = [value]
-      cPickle.dump(results, open("results_%s.p" % k, "wb"))
-      (self.p_guess, self.s_guess) = BitDiddleModule.reduce(results, p_initial)
-      if self.p_guess != None:
-        break
+    cPickle.dump(results, open('results.p', 'wb'))
+    (self.p_guess, self.s_guess) = BitDiddleModule.reduce(results, p_initial)
 
     self.check()
 
@@ -70,15 +67,28 @@ class BitDiddleModule:
       p_guess[i] = temp.index(i)
     return p_guess
 
-  def guessS(self, p_guess):
-    # Map sequences of single bytes through S
+  def guessOffset(self):
+    # Map non-permuted sequences of repeated single bytes through S for 3 rounds case.
+    for value in range(0, 256):
+      repeated_value = 0
+      for i in range(0, 64, 8):
+        repeated_value = repeated_value | (value << i)
+      enc = self.keymaster.getCiphertext(repeated_value << 64) >> 64
+      if enc == repeated_value:
+        print 'O: %s' % BitDiddleUtil.toBase16(repeated_value).zfill(16)
+        return repeated_value
+    raise Exception('Could not find offset to accommodate s[0]')
+
+  def guessS(self, p_guess, offset):
+    # Map reverse-permuted sequences of repeated single bytes through S
     outputs = [array.array('B', [0]*256) for i in range(0, 8)]
     for value in range(0, 256):
       repeated_value = 0
       for i in range(0, 64, 8):
         repeated_value = repeated_value | (value << i)
+      cleartext = offset ^ BitDiddleUtil.unpermute(repeated_value, p_guess)
       enc = self.keymaster.getCiphertext(
-        BitDiddleUtil.shiftIfThreeRounds(BitDiddleUtil.unpermute(repeated_value, p_guess), self.rounds)) >> 64
+        BitDiddleUtil.shiftIfThreeRounds(cleartext, self.rounds)) >> 64
 
       for i in range(0, 8):
         output = (enc >> (i * 8)) & 0xFF
@@ -86,31 +96,20 @@ class BitDiddleModule:
 
     return outputs
 
-  def mapper(outputs, p_guess, k):
+  def mapper(outputs, p_guess, i):
     # Now outputs contains, for each byte, the s-table for that byte with the byte permutation applied to that byte.
-    # In the case of 2 rounds, I need to find a second-order permutation pdelta for each byte.
-    # In the case of 3 rounds, I need to find both the second-order pdelta and an offset k.
-    repeated_k = 0
-    for i in range(0, 64, 8):
-      repeated_k = repeated_k | (k << i)
-    permuted_k = BitDiddleUtil.permute(repeated_k, p_guess)
+    counter = 0
+    for pdelta in itertools.permutations(array.array('B', [0, 1, 2, 3, 4, 5, 6, 7])):
+      # Temp output progress
+      if counter % 1000 == 0:
+        print '%s: %s' % (i, counter)
+      counter += 1
 
-    for i in range(0, 8):
-      counter = 0
-      for pdelta in itertools.permutations(array.array('B', [0, 1, 2, 3, 4, 5, 6, 7])):
-        # Temp output progress
-        if counter % 1000 == 0:
-          print "%s: %s" % (i, counter)
-        counter += 1
+      s_temp = array.array('B', [0]*256)
 
-        s_temp = array.array('B', [0]*256)
-        k_to_xor = permuted_k & 0xFF
-        permuted_k = permuted_k >> 8
-
-        for x in range(0, 256):
-          s_temp[BitDiddleUtil.permute(x ^ k_to_xor, pdelta)] = outputs[i][x]
-          
-        yield (k, s_temp), (i, pdelta)
+      for x in range(0, 256):
+        s_temp[BitDiddleUtil.permute(x, pdelta)] = outputs[i][x]
+      yield s_temp, (i, pdelta)
   mapper = staticmethod(mapper)
 
   def reduce(results, p_guess):
@@ -144,22 +143,17 @@ class BitDiddleModule:
     for i in range(0, 64):
       final_p[i] = 8 * (p_guess[i] / 8) + offset[p_guess[i]]
 
-    final_s = array.array('B', [0]*256)
-
-    k = sKey[0]
-    for i in range(0, 256):
-      final_s[i] = sKey[1][i ^ k]
-
-    return (final_p, final_s)
+    return (final_p, sKey)
   reduceInner = staticmethod(reduceInner)
 
   def check(self):
     if BitDiddleUtil.encryptLocally(0, self.p_guess, self.s_guess, self.rounds) == self.keymaster.getCiphertext(0):
-      print "Success!"
+      print 'Success!'
     for i in range(0, 256):
       plaintext = random.randint(0, 2 ** 128 - 1)
       if BitDiddleUtil.encryptLocally(plaintext, self.p_guess, self.s_guess, self.rounds) != self.keymaster.getCiphertext(plaintext):
-        print "Failed on input %s" % plaintext
+        print 'Failed on input %s' % plaintext
+        break
     self.keymaster.guess(self.p_guess, self.s_guess)
 
 class BitDiddleKeyMaster:
@@ -189,7 +183,7 @@ class BitDiddleLocalKeyMaster(BitDiddleKeyMaster):
     random.shuffle(self.p_actual)
     self.s_actual = array.array('B', [random.randint(0, 255) for x in range(0, 256)])
     self.rounds = rounds
-    cPickle.dump([self.p_actual, self.s_actual], open("actual.p", "wb"))
+    cPickle.dump([self.p_actual, self.s_actual], open('actual.p', 'wb'))
 
   def callKeymaster(self, plaintext):
     return BitDiddleUtil.toBase16(BitDiddleUtil.encryptLocally(BitDiddleUtil.fromBase16(plaintext), self.p_actual, self.s_actual, self.rounds)).zfill(32)
@@ -298,4 +292,4 @@ class BitDiddleUtil:
   substitute = staticmethod(substitute)
 
 if __name__ == '__main__':
-  BitDiddleModule().run()
+  BitDiddleModule().runSerially()
