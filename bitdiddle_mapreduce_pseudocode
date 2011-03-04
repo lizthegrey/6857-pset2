@@ -1,0 +1,21 @@
+import BitDiddleModule
+
+class BitDiddleConstants:
+  def getP(self):
+    return array('B', [...])
+  def getOutputs(self):
+    return [array('B', [...]), array('B', [...]), ...]
+
+class BitDiddleMRMapper(Mapper, BitDiddleConstants):
+  def Map(self, map_input):
+    generator = BitDiddleModule.mapper(self.getOutputs(), self.getP(), int(map_input.key()))
+    for key, value in generator:
+      yield cPickle.dumps(key), cPickle.dumps(value)
+
+class BitDiddleMRReducer(Reducer, BitDiddleConstants):
+  def Reduce(self, reduce_input):
+    key = cPickle.loads(reduce_input.key())
+    values = (cPickle.loads(x) for x in reduce_input.values())
+    result = BitDiddleModule.reduceInner(key, values, self.getP())
+    if result != None:
+      yield str(result)
