@@ -30,12 +30,15 @@ class Rc4Solver:
         self.j = (self.j + self.state[self.i]) % 256;
         self.swap_state(self.i,self.j);
         self.out = self.state[(self.state[self.i]+self.state[self.j])%256];
-        print "expected: " + str(int(ord(out_byte))) + " actual: " + str(self.out);
+        if (self.out != int(ord(out_byte))):
+            print "Not a match";
+        #print "expected: " + str(int(ord(out_byte))) + " actual: " + str(self.out);
+        #print (self.out == int(ord(out_byte)));
         #print "expected: " + str(int(ord(leak_byte))) + " actual: " + str(self.j);
         
     def check_solution(self, leak_bytes, out_bytes, w):
         print "\nChecking solution...";
-        for w in range(w, w + 30):
+        for w in range(w, len(out_bytes)):
             self.check_round(out_bytes[w], leak_bytes[w]);
 
     def decrypt_round(self, out_byte, leak_byte):
